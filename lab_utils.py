@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from scipy import stats
 NUTRIENTS = ['proteins_100g', 'fat_100g', 'carbohydrates_100g', 'sugars_100g', 'energy-kcal_100g']
 COLORS = {'proteins_100g': '#4C72B0', 'sugars_100g': '#DD8452', 'fat_100g': '#55A868'}
 LABELS = {
@@ -53,3 +54,24 @@ def clean_yogurts(raw): #функция для чистки данных
 
 def atwater(df): 
     return 4 * df['proteins_100g'] + 9 * df['fat_100g'] + 4 * df['carbohydrates_100g'] #формула общей каллорийности из энергетической ценности каждого нутриента
+def describe(x): #расчитаем статистические параметпы датасета со случайными величинами
+    x = pd.Series(x).dropna()
+    q1, q3 = x.quantile(0.25), x.quantile(0.75)
+    return {
+        'n': len(x),
+        'E': x.mean(),
+        'D': x.var(),
+        'sigma': x.std(),
+        'CV, %': x.std() / x.mean() * 100,
+        'min': x.min(),
+        'Q1': q1,
+        'медиана': x.median(),
+        'Q3': q3,
+        'max': x.max(),
+        'IQR': q3 - q1,
+        'мода': x.mode().iloc[0],
+        'асимметрия': stats.skew(x),
+        'эксцесс': stats.kurtosis(x),
+    }
+def describe_table(columns):
+    return pd.DataFrame({name: describe(x) for name, x in columns.items()}).round(3)
