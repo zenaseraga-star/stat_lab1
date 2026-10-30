@@ -294,3 +294,136 @@ def plot_fits(x, col, m, xmax=None):
     axes[1].legend()
     plt.tight_layout()
     plt.show()
+
+def normalize_plots(x, col, log=False):
+    c = COLORS[col]
+    v = np.log(x) if log else x
+    z = (v - v.mean()) / v.std()#нормализуем с использованием логорифмов
+    mm = (x - x.min()) / (x.max() - x.min())#нормализуем относительно минимума и максимума
+    grid = np.linspace(-4, 4, 300)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+    axes[0].hist(mm, bins=60, color=c, alpha=0.6)
+    axes[0].set_title('min-max: (x - min)/(max - min)')
+    axes[0].set_xlabel('значение в [0, 1]')
+    axes[0].set_ylabel('количество')
+    axes[1].hist(z, bins=60, density=True, color=c, alpha=0.6, label='z')
+    axes[1].plot(grid, stats.norm.pdf(grid), 'k--', label='N(0, 1)')
+    axes[1].set_title('z = (ln x - E)/sigma' if log else 'z = (x - E)/sigma')
+    axes[1].set_xlabel('z')
+    axes[1].set_ylabel('плотность')
+    axes[1].legend()
+    stats.probplot(z, dist='norm', plot=axes[2])#смотрим совпадение с теоритическими процентилями после логорифирования
+    axes[2].get_lines()[0].set(color=c, markersize=2)
+    axes[2].get_lines()[1].set(color='k')
+    axes[2].set_title('Q-Q plot z относительно N(0, 1)')
+    axes[2].set_xlabel('теоретические квантили N(0, 1)')
+    axes[2].set_ylabel('квантили z')
+    plt.tight_layout()
+    plt.show()
+    return z
+
+def consistency_plots(x, col, ns=None, reps=500, eps_frac=0.1, seed=2):
+    rng = np.random.default_rng(seed)
+    values = x.values
+    mu, sd, med = values.mean(), values.std(), np.median(values)
+    if ns is None:
+        ns = [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
+    rows = []
+    for n in ns:
+        s = rng.choice(values, size=(reps, n), replace=True)#создает матрицу со случайными наборами значения белка, т.е. создает выборки
+        m = s.mean(axis=1)
+        d = s.std(axis=1, ddof=1)
+        me = np.median(s, axis=1)
+        rows.append({ #для кажой выборки считаем, насколько выборочные значения матожидания, среднего отклонения, медианы и MSE от истиннго
+            'n': n,
+            'P(|E* - E| > eps)': np.mean(np.abs(m - mu) > eps_frac * sd),
+            'P(|s - sigma| > eps)': np.mean(np.abs(d - sd) > eps_frac * sd),
+            'P(|Me* - Me| > eps)': np.mean(np.abs(me - med) > eps_frac * sd),
+            'MSE(E*)': np.mean((m - mu) ** 2),
+            'sigma^2/n': sd ** 2 / n,
+        })
+    res = pd.DataFrame(rows) 
+    c = COLORS[col]
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.2))
+    for k in range(5):
+        path = rng.choice(values, size=10000, replace=True)
+        axes[0].plot(np.arange(1, 10001), np.cumsum(path) / np.arange(1, 10001), lw=1, alpha=0.8)
+    axes[0].axhline(mu, color='k', ls='--', label=f'E генеральной = {mu:.3f}')
+    axes[0].set_xscale('log')
+    axes[0].set_title('Среднее по растущей выборке, 5 траекторий')
+    axes[0].set_xlabel('объем выборки n')
+    axes[0].set_ylabel('выборочное среднее')
+    axes[0].legend()
+    axes[1].plot(res['n'], res['P(|E* - E| > eps)'], 'o-', color=c, label='среднее')
+    axes[1].plot(res['n'], res['P(|s - sigma| > eps)'], 's-', color='k', label='ст. отклонение')
+    axes[1].plot(res['n'], res['P(|Me* - Me| > eps)'], '^-', color='r', label='медиана')
+    axes[1].set_xscale('log')
+    axes[1].set_title(f'P(|оценка - параметр| > eps), eps = {eps_frac} sigma')
+    axes[1].set_xlabel('объем выборки n')
+    axes[1].set_ylabel('доля из 500 повторов')
+    axes[1].legend()
+    axes[2].loglog(res['n'], res['MSE(E*)'], 'o', color=c, label='MSE среднего (эксперимент)')
+    axes[2].loglog(res['n'], res['sigma^2/n'], 'k--', label='sigma$^2$/n (теория)')
+    axes[2].set_title('Среднеквадратичная ошибка среднего')
+    axes[2].set_xlabel('объем выборки n')
+    axes[2].set_ylabel('MSE')
+    axes[2].legend()
+    plt.tight_layout()
+    plt.show()
+    return res
+def sample_compare(x, n=1000, seed=3):
+    rng = np.random.default_rng(seed)#3 способа взять выборку
+    idx_with = rng.choice(len(x), size=n, replace=True)#с повторами
+    idx_without = rng.choice(len(x), size=n, replace=False)#ьез повторов
+    with_r = x.iloc[idx_with]
+    without_r = x.iloc[idx_without]
+    first = x.iloc[:n].reset_index(drop=True)#просто первые 1000 строк
+    keys = ['E', 'sigma', 'медиана', 'Q1', 'Q3', 'асимметрия', 'эксцесс']
+    t = pd.DataFrame({
+        'генеральная': {k: describe(x)[k] for k in keys},
+        'с возвращением': {k: describe(with_r)[k] for k in keys},
+        'без возвращения': {k: describe(without_r)[k] for k in keys},
+        f'первые {n} строк': {k: describe(first)[k] for k in keys},
+    })
+    ks = {
+        'с возвращением': stats.ks_2samp(with_r, x).pvalue,
+        'без возвращения': stats.ks_2samp(without_r, x).pvalue,
+        f'первые {n} строк': stats.ks_2samp(first, x).pvalue,
+    }#насколько правильно выборка описывает генеральную совокупность
+    t.loc['KS p-value (с генеральной)'] = [np.nan] + list(ks.values())
+    t.loc['разных йогуртов в выборке'] = [len(x), len(set(idx_with)), len(set(idx_without)), n]
+    return t.round(4), with_r, without_r
+
+def fpc_experiment(x, ns=None, reps=1000, seed=4):
+    rng = np.random.default_rng(seed)
+    values = x.values
+    N = len(values)
+    s2 = values.var()
+    if ns is None:
+        ns = [100, 1000, 5000, 10000, 20000, 30000]
+    rows = []
+    for n in ns:
+        m_with = np.array([rng.choice(values, n, replace=True).mean() for _ in range(reps)])
+        m_without = np.array([rng.choice(values, n, replace=False).mean() for _ in range(reps)])
+        rows.append({
+            'n': n,
+            'n/N': n / N,
+            'D(E*) с возвр., эксп.': m_with.var(),
+            'sigma^2/n': s2 / n,
+            'D(E*) без возвр., эксп.': m_without.var(),
+            'sigma^2/n * (N-n)/(N-1)': s2 / n * (N - n) / (N - 1),
+        })
+    res = pd.DataFrame(rows)
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+    ax.plot(res['n'], res['D(E*) с возвр., эксп.'], 'o', color='k', label='с возвращением, эксперимент')
+    ax.plot(res['n'], res['sigma^2/n'], 'k--', label='sigma$^2$/n')
+    ax.plot(res['n'], res['D(E*) без возвр., эксп.'], 's', color='r', label='без возвращения, эксперимент')
+    ax.plot(res['n'], res['sigma^2/n * (N-n)/(N-1)'], 'r-', label='sigma$^2$/n (N-n)/(N-1)')
+    ax.set_yscale('log')
+    ax.set_title('Дисперсия выборочного среднего')
+    ax.set_xlabel('объем выборки n')
+    ax.set_ylabel('D(E*)')
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+    return res
