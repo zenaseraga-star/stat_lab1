@@ -162,7 +162,7 @@ def order_check(x, col, window=500):
 
     z, p = runstest_1samp(x.values, cutoff='median')
     ac = pd.Series(x.values).autocorr(1)
-    shuffled = pd.Series(np.random.default_rng(1).permutation(x.values))
+    shuffled = pd.Series(np.random.default_rng(1).permutation(x.values))#перемешаем весь датасет, чтобы точно избежать скрытого порядка
     fig, ax = plt.subplots(figsize=(14, 3.5))
     ax.plot(x.values, lw=0.2, color='grey', alpha=0.4)
     ax.plot(pd.Series(x.values).rolling(window).mean().values, color=COLORS[col], lw=2, label=f'скользящее среднее по {window}, как в файле')
@@ -174,4 +174,123 @@ def order_check(x, col, window=500):
     plt.tight_layout()
     plt.show()
     return {'критерий серий, z': z, 'критерий серий, p-value': p, 'автокорреляция lag 1': ac,
-            'автокорреляция после перемешивания': shuffled.autocorr(1)}
+            'автокорреляция после перемешивания': shuffled.autocorr(1)} #z показывает сколько раз происходит чередование значения относительно медианного
+
+def eda_plots(x, col, bins=60):
+    c = COLORS[col]
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.2))
+    sns.histplot(x, bins=bins, kde=True, stat='density', color=c, ax=axes[0])#строим распределение
+    axes[0].axvline(x.mean(), color='k', ls='--', lw=1, label=f'E = {x.mean():.2f}')
+    axes[0].axvline(x.median(), color='r', ls=':', lw=1.5, label=f'медиана = {x.median():.2f}')
+    axes[0].set_title('Гистограмма и KDE')
+    axes[0].set_xlabel(LABELS[col])
+    axes[0].set_ylabel('плотность')
+    axes[0].legend()
+    sns.boxplot(x=x, color=c, ax=axes[1], flierprops={'markersize': 2})#строим бокс по процентилям(где по белку лежит основная масса йогуртов)
+    axes[1].set_title('Boxplot')
+    axes[1].set_xlabel(LABELS[col])
+    stats.probplot(x, dist='norm', plot=axes[2])#сравниваем с нормальным распределением по процентилям
+    axes[2].get_lines()[0].set(color=c, markersize=2)
+    axes[2].get_lines()[1].set(color='k')
+    axes[2].set_title('Q-Q plot относительно нормального')
+    axes[2].set_xlabel('теоретические квантили N(0, 1)')
+    axes[2].set_ylabel('выборочные квантили')
+    plt.tight_layout()
+    plt.show()
+
+
+def outliers_iqr(x):
+    q1, q3 = x.quantile(0.25), x.quantile(0.75) #считаем границы по процентилям
+    low, high = q1 - 1.5 * (q3 - q1), q3 + 1.5 * (q3 - q1)
+    return x[(x < low) | (x > high)], low, high
+
+def fit_mixture(x, k=2, log=False, seed=0):
+    from sklearn.mixture import GaussianMixture
+
+    v = np.log(x.values) if log else x.values
+    g = GaussianMixture(n_components=k, random_state=seed, n_init=5).fit(v.reshape(-1, 1))#ищем холмики(2)
+    order = np.argsort(g.means_.ravel())
+    w = g.weights_[order]
+    mu = g.means_.ravel()[order]
+    sd = np.sqrt(g.covariances_.ravel())[order]
+    ll = g.score(v.reshape(-1, 1)) * len(v) #расчет, насколько правильно мы описали данные
+    if log:
+        ll = ll - np.log(x.values).sum()
+    name = f'смесь {k} логнормальных' if log else f'смесь {k} нормальных'
+    return {'name': name, 'k': k, 'log': log, 'w': w, 'mu': mu, 'sd': sd, 'logL': ll, 'model': g}
+
+
+def fit_table(x, mixture=None):#смотрим по тому, что мы получили в прошлый раз, какое распределение подходит лучше всего
+    rows = {}
+    for name, dist in [('нормальное', stats.norm), ('логнормальное', stats.lognorm), ('гамма', stats.gamma)]:
+        if name == 'нормальное':
+            p = dist.fit(x)
+        else:
+            p = dist.fit(x, floc=0)
+        ll = dist.logpdf(x, *p).sum()
+        rows[name] = {'число параметров': 2, 'logL': ll, 'AIC': 4 - 2 * ll, 'BIC': 2 * np.log(len(x)) - 2 * ll}
+    if mixture is not None:
+        k = 3 * mixture['k'] - 1
+        rows[mixture['name']] = {'число параметров': k, 'logL': mixture['logL'], 'AIC': 2 * k - 2 * mixture['logL'],
+                                 'BIC': k * np.log(len(x)) - 2 * mixture['logL']}
+    return pd.DataFrame(rows).T
+
+def mixture_table(m): #сравним парметры двух полученных компонент
+    rows = []
+    for i, (w, mu, sd) in enumerate(zip(m['w'], m['mu'], m['sd'])):
+        row = {'компонента': i + 1, 'вес w': w, 'mu': mu, 'sigma': sd}
+        row['медиана компоненты, г/100 г'] = np.exp(mu) if m['log'] else mu
+        rows.append(row)
+    return pd.DataFrame(rows).round(3)
+
+def mixture_pdf(grid, m): #возращает сумму колоколов и какждый по отдельности
+    total = np.zeros_like(grid, dtype=float)
+    parts = []
+    for w, mu, sd in zip(m['w'], m['mu'], m['sd']):
+        if m['log']:
+            p = w * stats.lognorm.pdf(grid, sd, scale=np.exp(mu))
+        else:
+            p = w * stats.norm.pdf(grid, mu, sd)
+        parts.append(p)
+        total += p
+    return total, parts
+
+def mixture_cdf(grid, m): #рассчитываем вероятности для функции распределения
+    total = np.zeros_like(grid, dtype=float)
+    for w, mu, sd in zip(m['w'], m['mu'], m['sd']):
+        if m['log']:
+            total += w * stats.lognorm.cdf(grid, sd, scale=np.exp(mu))
+        else:
+            total += w * stats.norm.cdf(grid, mu, sd)
+    return total
+
+def plot_fits(x, col, m, xmax=None):
+    c = COLORS[col]
+    xmax = xmax or x.quantile(0.999)
+    grid = np.linspace(max(x.min(), 1e-3), xmax, 500)
+    pn = stats.norm.fit(x)
+    pl = stats.lognorm.fit(x, floc=0)
+    total, parts = mixture_pdf(grid, m)
+    fig, axes = plt.subplots(1, 2, figsize=(15, 4.3))
+    axes[0].hist(x[x <= xmax], bins=80, density=True, color=c, alpha=0.4, label='данные')#строим график плотностей для различных распределений
+    axes[0].plot(grid, stats.norm.pdf(grid, *pn), 'k--', lw=1, label='нормальное')
+    axes[0].plot(grid, stats.lognorm.pdf(grid, *pl), color='grey', lw=1, label='логнормальное')
+    axes[0].plot(grid, total, 'r-', lw=2, label=m['name'])
+    for i, p in enumerate(parts):
+        axes[0].plot(grid, p, 'r:', lw=1.2, label='компоненты смеси' if i == 0 else None)
+    axes[0].set_title('Подбор распределения')
+    axes[0].set_xlabel(LABELS[col])
+    axes[0].set_ylabel('плотность')
+    axes[0].legend()
+    xs = np.sort(x.values)
+    axes[1].step(xs, np.arange(1, len(xs) + 1) / len(xs), where='post', color=c, label='эмпирическая F(x)')#строим сами функции распределения 
+    axes[1].plot(grid, stats.norm.cdf(grid, *pn), 'k--', lw=1, label='нормальное')
+    axes[1].plot(grid, stats.lognorm.cdf(grid, *pl), color='grey', lw=1, label='логнормальное')
+    axes[1].plot(grid, mixture_cdf(grid, m), 'r-', lw=1.5, label=m['name'])
+    axes[1].set_xlim(grid[0], xmax)
+    axes[1].set_title('Функции распределения')
+    axes[1].set_xlabel(LABELS[col])
+    axes[1].set_ylabel('F(x)')
+    axes[1].legend()
+    plt.tight_layout()
+    plt.show()
