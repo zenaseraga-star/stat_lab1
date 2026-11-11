@@ -1,3 +1,5 @@
+SEED = 20261109
+
 def protein_summary(protein):
     return {
         "Всего значений": len(protein),
