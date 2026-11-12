@@ -1,4 +1,3 @@
-
 import unittest
 import numpy as np
 from rng_protein import ParkMiller, XorShift64Star, ProteinRNG
